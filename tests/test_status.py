@@ -44,6 +44,39 @@ class StatusTests(unittest.TestCase):
     def test_not_object(self):
         self.assertEqual(module.classify_status('[]'), (False, 'Status unavailable', ''))
 
+    def test_peer_list_sorted_and_copyable_fields(self):
+        payload = {
+            'BackendState': 'Running',
+            'Self': {'HostName': 'workstation', 'DNSName': 'workstation.example.ts.net.',
+                     'TailscaleIPs': ['100.64.0.1', 'fd7a::1']},
+            'Peer': {
+                'abc': {'HostName': 'z-offline', 'Online': False,
+                        'TailscaleIPs': ['100.64.0.3'], 'OS': 'linux'},
+                'def': {'DNSName': 'a-online.example.ts.net.', 'Online': True,
+                        'TailscaleIPs': ['100.64.0.2', 'fd7a::2'], 'OS': 'windows'}
+            }
+        }
+        local, peers = module.visible_devices(json.dumps(payload))
+        self.assertEqual(local['name'], 'workstation')
+        self.assertEqual(local['ips'], ['100.64.0.1', 'fd7a::1'])
+        self.assertEqual([p['name'] for p in peers], ['a-online', 'z-offline'])
+        self.assertEqual(peers[0]['dns'], 'a-online.example.ts.net')
+        self.assertIs(peers[0]['online'], True)
+        self.assertIs(peers[1]['online'], False)
+
+    def test_peer_list_not_available_when_down(self):
+        local, peers = module.visible_devices('{"BackendState":"Stopped","Peer":{"x":{"HostName":"x"}}}')
+        self.assertIsNone(local)
+        self.assertEqual(peers, [])
+
+    def test_peer_list_missing_or_malformed_fields(self):
+        local, peers = module.visible_devices(
+            '{"BackendState":"Running","Self":[],"Peer":{"x":{"TailscaleIPs":null,"Online":"yes"}}}'
+        )
+        self.assertIsNone(local)
+        self.assertEqual(peers[0]['ips'], [])
+        self.assertIsNone(peers[0]['online'])
+
 
 if __name__ == '__main__':
     unittest.main()

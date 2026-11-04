@@ -5,9 +5,9 @@ A lightweight, **unofficial** Tailscale system-tray indicator for **CachyOS / Ar
 - **White T** on a transparent background: Tailscale is up (`Running`).
 - **Black T** on a transparent background: Tailscale is down, logged out, or unavailable.
 - **Left-click** the T to toggle between `tailscale up` and `tailscale down`.
-- **Right-click** to connect/disconnect, refresh status, or quit.
+- **Right-click** for local device info, peer list (online/offline), OS, IPv4/IPv6, MagicDNS, connection method when known, one-click copy, refresh, connect/disconnect, and quit.
 - Automatically refreshes status every **5 seconds**, with tooltip and error notifications.
-- Optional autostart at login. No root privileges or password required to **run the app**.
+- Optional **single systemd user-service autostart** at login (the installer removes its prior KDE autostart entry). No root privileges or password required to **run the app**.
 
 > This is a community project, not associated with or endorsed by Tailscale Inc.
 
@@ -48,8 +48,12 @@ After that, clicking the T should toggle Tailscale without a password prompt. Th
 git clone https://github.com/mrdink/mrdink_TSTaskbar.git
 cd mrdink_TSTaskbar
 bash scripts/install-local.sh --autostart
-~/.local/bin/tailscale-t-indicator
+systemctl --user start tailscale-t-indicator.service
 ```
+
+The `--autostart` installer uses the systemd **user** service only. It removes the older `~/.config/autostart/tailscale-t-indicator.desktop` entry to prevent two tray icons. It does not modify unrelated autostart files. It enables the service but doesn't launch a second process on top of a manually started one; close any manually started indicator before starting the service. The service starts after the graphical session with a five-second delay.
+
+Check: `systemctl --user status tailscale-t-indicator.service`. Disable: `systemctl --user disable --now tailscale-t-indicator.service`.
 
 To install *without* autostart, run `bash scripts/install-local.sh` instead. Everything goes into your home directory; the installer does not need root.
 
@@ -85,6 +89,8 @@ makepkg --printsrcinfo > .SRCINFO
 ```bash
 python -m unittest discover -s tests -v
 ```
+
+Right-click device details come from the local `tailscale status --json` response. It lists only peers visible to this device, not necessarily the full tailnet. Online status and the current connection method may be unknown. Choosing an IP or MagicDNS item copies it to the clipboard; no privileged calls are used for this.
 
 The app reads `tailscale status --json` and only enables the toggle for unambiguous `Running` / `Stopped` states. The icon falls back to black if status cannot be read, but the toggle is disabled in that case. Connection changes use the current user's `tailscale` CLI credentials, not a privileged service.
 
