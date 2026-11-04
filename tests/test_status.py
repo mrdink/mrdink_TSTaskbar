@@ -1,8 +1,10 @@
 """Unit tests use only Python's standard library (no GUI required)."""
 import importlib.util
 import json
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'src/tailscale_t_indicator.py'
 spec = importlib.util.spec_from_file_location('tailscale_t_indicator', SCRIPT)
@@ -11,6 +13,27 @@ spec.loader.exec_module(module)
 
 
 class StatusTests(unittest.TestCase):
+    def test_tailscale_path_is_absolute(self):
+        self.assertEqual(module.TAILSCALE_EXECUTABLE, '/usr/bin/tailscale')
+
+    def test_tailscale_executable_check(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            executable = Path(temp_dir) / 'tailscale'
+            executable.write_text('#!/bin/sh\nexit 0\n')
+            with patch.object(module, 'TAILSCALE_EXECUTABLE', str(executable)):
+                executable.chmod(0o755)
+                self.assertTrue(module.tailscale_binary_available())
+                executable.chmod(0o644)
+                self.assertFalse(module.tailscale_binary_available())
+            with patch.object(module, 'TAILSCALE_EXECUTABLE', str(executable) + '-missing'):
+                self.assertFalse(module.tailscale_binary_available())
+
+    def test_process_launches_do_not_search_path(self):
+        source = SCRIPT.read_text()
+        self.assertIn('self.status_process.start(TAILSCALE_EXECUTABLE,', source)
+        self.assertIn('self.action_process.start(TAILSCALE_EXECUTABLE,', source)
+        self.assertNotIn('shutil.which', source)
+
     def test_running(self):
         payload = {'BackendState': 'Running', 'Self': {'TailscaleIPs': ['100.90.2.3']}}
         self.assertEqual(module.classify_status(json.dumps(payload)), (True, 'Connected', '100.90.2.3'))

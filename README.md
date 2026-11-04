@@ -15,6 +15,8 @@ A lightweight, **unofficial** Tailscale system-tray indicator for **CachyOS / Ar
 
 KDE Plasma (or another desktop with a system tray), Tailscale configured on your machine, Python 3, and PySide6/Qt 6.
 
+For security, this Arch/CachyOS build invokes the Tailscale CLI using the fixed path `/usr/bin/tailscale`, not the user's `PATH`. If your distribution installs the binary elsewhere, adjust `TAILSCALE_EXECUTABLE` in the Python source.
+
 On CachyOS / Arch Linux:
 
 ```bash

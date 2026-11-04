@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import json
-import shutil
+import os
 import sys
 from pathlib import Path
 
@@ -12,6 +12,14 @@ from pathlib import Path
 REFRESH_MS = 5_000
 STATUS_TIMEOUT_MS = 3_500
 ACTION_TIMEOUT_MS = 30_000
+# On Arch Linux and CachyOS, tailscale is provided at this fixed, root-owned path.
+# Do not resolve the command through PATH (which may contain untrusted directories).
+TAILSCALE_EXECUTABLE = "/usr/bin/tailscale"
+
+
+def tailscale_binary_available() -> bool:
+    """Check the fixed executable path without searching the user's PATH."""
+    return Path(TAILSCALE_EXECUTABLE).is_file() and os.access(TAILSCALE_EXECUTABLE, os.X_OK)
 
 
 def parse_status(raw: bytes | str) -> dict:
@@ -258,10 +266,10 @@ def main() -> int:
                 return
             if self.status_process.state() != QProcess.ProcessState.NotRunning:
                 return
-            if shutil.which("tailscale") is None:
+            if not tailscale_binary_available():
                 self.show_status(False, "Tailscale CLI not found")
                 return
-            self.status_process.start("tailscale", ["status", "--json"])
+            self.status_process.start(TAILSCALE_EXECUTABLE, ["status", "--json"])
             self.status_timeout.start(STATUS_TIMEOUT_MS)
 
         def on_status_finished(self, exit_code: int, exit_status: QProcess.ExitStatus) -> None:
@@ -303,7 +311,7 @@ def main() -> int:
         def toggle(self) -> None:
             if self.active_action is not None or self.next_action is None:
                 return
-            if shutil.which("tailscale") is None:
+            if not tailscale_binary_available():
                 self.show_status(False, "Tailscale CLI not found")
                 return
 
@@ -312,7 +320,7 @@ def main() -> int:
             self.action_timed_out = False
             self.show_status(self.connected, "Connecting…" if command == "up" else "Disconnecting…")
             # Use the normal user's Tailscale operator permission: never spawn sudo.
-            self.action_process.start("tailscale", [command])
+            self.action_process.start(TAILSCALE_EXECUTABLE, [command])
             self.action_timeout.start(ACTION_TIMEOUT_MS)
 
         def on_action_finished(self, exit_code: int, exit_status: QProcess.ExitStatus) -> None:
