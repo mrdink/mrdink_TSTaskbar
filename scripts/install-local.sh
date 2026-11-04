@@ -18,9 +18,21 @@ sed "s|^Exec=.*|Exec=$HOME/.local/bin/tailscale-t-indicator|" \
     "$ROOT/desktop/tailscale-t-indicator.desktop" \
     > "$HOME/.local/share/applications/tailscale-t-indicator.desktop"
 if [[ "${1:-}" == "--autostart" ]]; then
-    install -d "$HOME/.config/autostart"
-    install -m 644 "$HOME/.local/share/applications/tailscale-t-indicator.desktop" \
-        "$HOME/.config/autostart/tailscale-t-indicator.desktop"
+    # Use exactly one autostart mechanism (systemd user service, not KDE XDG).
+    install -d "$HOME/.config/systemd/user"
+    install -m 644 "$ROOT/systemd/tailscale-t-indicator.service" \
+        "$HOME/.config/systemd/user/tailscale-t-indicator.service"
+    rm -f "$HOME/.config/autostart/tailscale-t-indicator.desktop" \
+          "$HOME/.config/autostart/tailscale-t-indicator.desktop.disabled"
+    systemctl --user daemon-reload
+    systemctl --user enable tailscale-t-indicator.service
+    # If the service is already running, apply the update immediately.
+    if systemctl --user is-active --quiet tailscale-t-indicator.service; then
+        systemctl --user restart tailscale-t-indicator.service
+    fi
+    echo "Enabled a single autostart mechanism: systemd user service."
+    echo "If currently running from python or gtk-launch, quit that copy."
+    echo "Start with: systemctl --user start tailscale-t-indicator.service"
 fi
 echo "Installed to ~/.local/bin/tailscale-t-indicator"
 echo "Start it with: ~/.local/bin/tailscale-t-indicator"

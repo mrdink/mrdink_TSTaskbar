@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import json
-import shutil
+import os
 import sys
 from pathlib import Path
 
@@ -12,6 +12,14 @@ from pathlib import Path
 REFRESH_MS = 5_000
 STATUS_TIMEOUT_MS = 3_500
 ACTION_TIMEOUT_MS = 30_000
+# On Arch Linux and CachyOS, tailscale is provided at this fixed, root-owned path.
+# Do not resolve the command through PATH (which may contain untrusted directories).
+TAILSCALE_EXECUTABLE = "/usr/bin/tailscale"
+
+
+def tailscale_binary_available() -> bool:
+    """Check the fixed executable path without searching the user's PATH."""
+    return Path(TAILSCALE_EXECUTABLE).is_file() and os.access(TAILSCALE_EXECUTABLE, os.X_OK)
 
 
 def parse_status(raw: bytes | str) -> dict:
@@ -52,6 +60,47 @@ def action_for_status(raw: bytes | str) -> str | None:
     """
     state = parse_status(raw).get("BackendState")
     return {"Running": "down", "Stopped": "up"}.get(state)
+
+
+def visible_devices(raw: bytes | str) -> tuple[dict | None, list[dict]]:
+    """Extract this device and peers from tailscale status --json.
+
+    Only devices visible to this node under tailnet policy are returned.
+    """
+    data = parse_status(raw)
+    if data.get("BackendState") != "Running":
+        return None, []
+
+    def normalize(node: object) -> dict | None:
+        if not isinstance(node, dict):
+            return None
+        ips = node.get("TailscaleIPs")
+        ips = [ip for ip in ips if isinstance(ip, str)] if isinstance(ips, list) else []
+        dns = node.get("DNSName") if isinstance(node.get("DNSName"), str) else ""
+        hostname = node.get("HostName") if isinstance(node.get("HostName"), str) else ""
+        name = hostname or dns.rstrip(".").split(".")[0] or "Unnamed device"
+        online = node.get("Online")
+        return {
+            "name": name,
+            "dns": dns.rstrip("."),
+            "ips": ips,
+            "os": node.get("OS") if isinstance(node.get("OS"), str) else "",
+            "online": online if isinstance(online, bool) else None,
+            "active": node.get("Active") is True,
+            "relay": node.get("Relay") if isinstance(node.get("Relay"), str) else "",
+            "address": node.get("CurAddr") if isinstance(node.get("CurAddr"), str) else "",
+        }
+
+    local = normalize(data.get("Self"))
+    peers_raw = data.get("Peer")
+    peers = []
+    if isinstance(peers_raw, dict):
+        for item in peers_raw.values():
+            peer = normalize(item)
+            if peer is not None:
+                peers.append(peer)
+    peers.sort(key=lambda peer: (peer["online"] is not True, peer["name"].casefold()))
+    return local, peers
 
 
 def find_icon(filename: str) -> Path:
@@ -96,6 +145,7 @@ def main() -> int:
             self.next_action: str | None = None
             self.active_action: str | None = None
             self.action_timed_out = False
+            self.device_snapshot = b""
 
             self.tray = QSystemTrayIcon(icon_down, app)
             self.tray.setToolTip("Tailscale: Checking status")
@@ -104,6 +154,10 @@ def main() -> int:
             self.status_action = QAction("Checking status…", menu)
             self.status_action.setEnabled(False)
             menu.addAction(self.status_action)
+            self.device_info = menu.addAction("This device: unavailable")
+            self.device_info.setEnabled(False)
+            self.devices_menu = menu.addMenu("Devices")
+            self.devices_menu.aboutToShow.connect(self.populate_devices)
             self.toggle_action = menu.addAction("Connect / Disconnect")
             self.toggle_action.setEnabled(False)
             self.toggle_action.triggered.connect(self.toggle)
@@ -141,6 +195,10 @@ def main() -> int:
             self.refresh()
 
         def show_status(self, connected: bool, label: str, ip: str = "", action: str | None = None) -> None:
+            if not connected:
+                self.device_snapshot = b""
+                self.device_info.setText("This device: unavailable")
+                self.device_info.setToolTip("")
             self.connected = connected
             self.next_action = action
             self.tray.setIcon(icon_up if connected else icon_down)
@@ -156,15 +214,62 @@ def main() -> int:
                                        "Disconnect Tailscale" if action == "down" else
                                        "Connect / Disconnect (status unavailable)")
 
+
+        def populate_devices(self) -> None:
+            """Build the peer menu on opening, not during the status polling timer."""
+            self.devices_menu.clear()
+            local, peers = visible_devices(self.device_snapshot)
+            if local is None:
+                action = self.devices_menu.addAction("Device list unavailable while disconnected")
+                action.setEnabled(False)
+                return
+
+            if not peers:
+                empty = self.devices_menu.addAction("No visible peers")
+                empty.setEnabled(False)
+                return
+
+            online_count = sum(peer["online"] is True for peer in peers)
+            header = self.devices_menu.addAction(f"{online_count} online / {len(peers)} visible")
+            header.setEnabled(False)
+            self.devices_menu.addSeparator()
+            for peer in peers:
+                state = "●" if peer["online"] is True else ("○" if peer["online"] is False else "?")
+                ip = peer["ips"][0] if peer["ips"] else "No Tailscale IP"
+                submenu = self.devices_menu.addMenu(f"{state} {peer['name']}  —  {ip}")
+                status = "Online" if peer["online"] is True else ("Offline" if peer["online"] is False else "Unknown")
+                title = submenu.addAction(f"Status: {status}")
+                title.setEnabled(False)
+                if peer["os"]:
+                    os_action = submenu.addAction(f"OS: {peer['os']}")
+                    os_action.setEnabled(False)
+                if peer["address"] and peer["active"]:
+                    direct = submenu.addAction(f"Connection: direct ({peer['address']})")
+                    direct.setEnabled(False)
+                elif peer["relay"] and peer["active"]:
+                    relay = submenu.addAction(f"Connection: relay ({peer['relay']})")
+                    relay.setEnabled(False)
+                submenu.addSeparator()
+                for ip_address in peer["ips"]:
+                    action = submenu.addAction(f"Copy IP: {ip_address}")
+                    action.triggered.connect(
+                        lambda checked=False, value=ip_address: QApplication.clipboard().setText(value)
+                    )
+                if peer["dns"]:
+                    action = submenu.addAction(f"Copy MagicDNS: {peer['dns']}")
+                    action.triggered.connect(
+                        lambda checked=False, value=peer["dns"]: QApplication.clipboard().setText(value)
+                    )
+
         def refresh(self) -> None:
             if self.active_action is not None:
                 return
             if self.status_process.state() != QProcess.ProcessState.NotRunning:
                 return
-            if shutil.which("tailscale") is None:
+            if not tailscale_binary_available():
                 self.show_status(False, "Tailscale CLI not found")
                 return
-            self.status_process.start("tailscale", ["status", "--json"])
+            self.status_process.start(TAILSCALE_EXECUTABLE, ["status", "--json"])
             self.status_timeout.start(STATUS_TIMEOUT_MS)
 
         def on_status_finished(self, exit_code: int, exit_status: QProcess.ExitStatus) -> None:
@@ -177,6 +282,15 @@ def main() -> int:
             # Status JSON can be meaningful even if the command returns nonzero.
             output = bytes(self.status_process.readAllStandardOutput())
             connected, label, ip = classify_status(output)
+            self.device_snapshot = output
+            local, peers = visible_devices(output)
+            if local is not None:
+                ip_text = ", ".join(local["ips"]) if local["ips"] else "No IP"
+                self.device_info.setText(f"This device: {local['name']} — {ip_text}")
+                self.device_info.setToolTip(local["dns"])
+            else:
+                self.device_info.setText("This device: unavailable")
+                self.device_info.setToolTip("")
             self.show_status(connected, label, ip, action_for_status(output))
 
         def on_status_error(self, error: QProcess.ProcessError) -> None:
@@ -197,7 +311,7 @@ def main() -> int:
         def toggle(self) -> None:
             if self.active_action is not None or self.next_action is None:
                 return
-            if shutil.which("tailscale") is None:
+            if not tailscale_binary_available():
                 self.show_status(False, "Tailscale CLI not found")
                 return
 
@@ -206,7 +320,7 @@ def main() -> int:
             self.action_timed_out = False
             self.show_status(self.connected, "Connecting…" if command == "up" else "Disconnecting…")
             # Use the normal user's Tailscale operator permission: never spawn sudo.
-            self.action_process.start("tailscale", [command])
+            self.action_process.start(TAILSCALE_EXECUTABLE, [command])
             self.action_timeout.start(ACTION_TIMEOUT_MS)
 
         def on_action_finished(self, exit_code: int, exit_status: QProcess.ExitStatus) -> None:
