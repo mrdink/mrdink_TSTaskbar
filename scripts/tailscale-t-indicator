@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /usr/bin/python /usr/lib/tailscale-t-indicator/tailscale_t_indicator.py "$@"

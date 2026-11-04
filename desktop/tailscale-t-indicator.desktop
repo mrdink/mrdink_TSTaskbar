@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Tailscale T Indicator
+GenericName=Tailscale Connection Indicator
+Comment=Show Tailscale connection status in the system tray
+Exec=tailscale-t-indicator
+Icon=network-vpn
+Terminal=false
+Categories=Network;Utility;
+StartupNotify=false

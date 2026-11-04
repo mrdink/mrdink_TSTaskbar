@@ -1,0 +1,34 @@
+# Maintainer: mrdink (https://github.com/mrdink)
+pkgname=tailscale-t-indicator-git
+pkgver=r1.0000000
+pkgrel=1
+pkgdesc='KDE Plasma Tailscale status tray icon with one-click connect/disconnect'
+arch=('any')
+url='https://github.com/mrdink/mrdink_TSTaskbar'
+license=('GPL-3.0-only')
+depends=('python' 'pyside6' 'tailscale')
+makedepends=('git')
+provides=('tailscale-t-indicator')
+source=("tailscale-t-indicator::git+${url}.git")
+sha256sums=('SKIP')
+
+pkgver() {
+    cd "$srcdir/tailscale-t-indicator"
+    printf 'r%s.%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+}
+
+package() {
+    local root="$srcdir/tailscale-t-indicator"
+    install -Dm755 "$root/src/tailscale_t_indicator.py" \
+        "$pkgdir/usr/lib/tailscale-t-indicator/tailscale_t_indicator.py"
+    install -Dm755 "$root/scripts/tailscale-t-indicator" \
+        "$pkgdir/usr/bin/tailscale-t-indicator"
+    install -Dm644 "$root/assets/t-up.png" \
+        "$pkgdir/usr/share/tailscale-t-indicator/assets/t-up.png"
+    install -Dm644 "$root/assets/t-down.png" \
+        "$pkgdir/usr/share/tailscale-t-indicator/assets/t-down.png"
+    install -Dm644 "$root/desktop/tailscale-t-indicator.desktop" \
+        "$pkgdir/usr/share/applications/tailscale-t-indicator.desktop"
+    install -Dm644 "$root/LICENSE" \
+        "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
