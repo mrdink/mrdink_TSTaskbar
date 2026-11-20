@@ -4,7 +4,7 @@ A lightweight, **unofficial** Tailscale system-tray indicator for **CachyOS / Ar
 
 - **White T** on a transparent background: Tailscale is up (`Running`).
 - **Black T** on a transparent background: Tailscale is down, logged out, or unavailable.
-- **Left-click** the T to toggle between `tailscale up` and `tailscale down`.
+- **Left-click** the T to toggle between `tailscale up` and `tailscale down`. If `tailscaled.service` is stopped, the same click starts that system service first, checks if Tailscale reconnected automatically, and runs `tailscale up` only if needed.
 - **Right-click** for local device info, peer list (online/offline), OS, IPv4/IPv6, MagicDNS, connection method when known, one-click copy, refresh, connect/disconnect, and quit.
 - Automatically refreshes status every **5 seconds**, with tooltip and error notifications.
 - Optional **single systemd user-service autostart** at login (the installer removes its prior KDE autostart entry). No root privileges or password required to **run the app**.
@@ -25,7 +25,7 @@ sudo pacman -S --needed python pyside6 tailscale git
 
 ## Important: Allow your user to toggle Tailscale
 
-**You must authorize your account once** before left-click can connect/disconnect. Tailscale normally requires administrator permission to change its connection state, so the tray app intentionally does not invoke `sudo` or `pkexec`.
+**You must authorize your account once** before left-click can connect/disconnect. Tailscale normally requires administrator permission to change its connection state, so the tray app intentionally does not invoke `sudo` or `pkexec` for CLI toggling. To start a stopped `tailscaled.service`, it runs `/usr/bin/systemctl start tailscaled.service`, requesting authorization from systemd/PolicyKit as needed. A working desktop authentication agent (normally provided by KDE Plasma) is required if your account is not authorized to start system services without a password. No sudoers rule or passwordless root access is installed.
 
 Run this **once** in a terminal as the desktop user who will run the app:
 
@@ -94,7 +94,9 @@ python -m unittest discover -s tests -v
 
 Right-click device details come from the local `tailscale status --json` response. It lists only peers visible to this device, not necessarily the full tailnet. Online status and the current connection method may be unknown. Choosing an IP or MagicDNS item copies it to the clipboard; no privileged calls are used for this.
 
-The app reads `tailscale status --json` and only enables the toggle for unambiguous `Running` / `Stopped` states. The icon falls back to black if status cannot be read, but the toggle is disabled in that case. Connection changes use the current user's `tailscale` CLI credentials, not a privileged service.
+Before each Tailscale status poll, the app checks `/usr/bin/systemctl is-active tailscaled.service`. If the daemon is inactive or failed, the icon offers **Start Tailscale service**; clicking invokes systemctl and may show a KDE authorization dialog. After the daemon starts, the app waits for its status, leaves an automatically reconnected session alone, and calls `tailscale up` only if Tailscale explicitly reports `Stopped`. It never silently starts the service merely because the indicator launched. Unknown service/Tailscale states do not trigger a connection command. If authorization fails, check that KDE's polkit agent is running, or start the system service manually with `sudo systemctl start tailscaled.service`.
+
+Normal connection changes still use the current user's `tailscale` CLI operator permission; the indicator itself remains unprivileged.
 
 The editable vector icons are in `assets/`; the app uses transparent 64×64 PNGs. These custom T icons are **not** Tailscale's trademarked logo.
 

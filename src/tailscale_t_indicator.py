@@ -6,20 +6,35 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 
 REFRESH_MS = 5_000
 STATUS_TIMEOUT_MS = 3_500
 ACTION_TIMEOUT_MS = 30_000
+SERVICE_START_TIMEOUT_MS = 120_000  # Allow time for graphical authorization.
+POST_START_CHECK_TIMEOUT_SECONDS = 30
 # On Arch Linux and CachyOS, tailscale is provided at this fixed, root-owned path.
 # Do not resolve the command through PATH (which may contain untrusted directories).
 TAILSCALE_EXECUTABLE = "/usr/bin/tailscale"
+SYSTEMCTL_EXECUTABLE = "/usr/bin/systemctl"
+TAILSCALED_UNIT = "tailscaled.service"
 
 
 def tailscale_binary_available() -> bool:
     """Check the fixed executable path without searching the user's PATH."""
     return Path(TAILSCALE_EXECUTABLE).is_file() and os.access(TAILSCALE_EXECUTABLE, os.X_OK)
+
+
+def daemon_start_action(state: str) -> str | None:
+    """A stopped or failed daemon may be started; never guess on unknown states."""
+    return "start" if state in ("inactive", "failed") else None
+
+
+def post_daemon_start_action(raw: bytes | str) -> str | None:
+    """Only bring up Tailscale if a freshly queried daemon reports Stopped."""
+    return "up" if parse_status(raw).get("BackendState") == "Stopped" else None
 
 
 def parse_status(raw: bytes | str) -> dict:
@@ -146,6 +161,10 @@ def main() -> int:
             self.active_action: str | None = None
             self.action_timed_out = False
             self.device_snapshot = b""
+            self.status_phase = "service"
+            self.status_timed_out = False
+            self.connect_after_start = False
+            self.connect_after_start_deadline = 0.0
 
             self.tray = QSystemTrayIcon(icon_down, app)
             self.tray.setToolTip("Tailscale: Checking status")
@@ -207,10 +226,13 @@ def main() -> int:
             if connected and ip:
                 tooltip += f"\nIP: {ip}"
             if action is not None and self.active_action is None:
-                tooltip += "\nLeft-click to connect" if action == "up" else "\nLeft-click to disconnect"
+                tooltip += ("\nLeft-click to start the Tailscale service" if action == "start" else
+                            "\nLeft-click to connect" if action == "up" else
+                            "\nLeft-click to disconnect")
             self.tray.setToolTip(tooltip)
             self.toggle_action.setEnabled(action is not None and self.active_action is None)
-            self.toggle_action.setText("Connect Tailscale" if action == "up" else
+            self.toggle_action.setText("Start Tailscale service" if action == "start" else
+                                       "Connect Tailscale" if action == "up" else
                                        "Disconnect Tailscale" if action == "down" else
                                        "Connect / Disconnect (status unavailable)")
 
@@ -266,21 +288,52 @@ def main() -> int:
                 return
             if self.status_process.state() != QProcess.ProcessState.NotRunning:
                 return
-            if not tailscale_binary_available():
-                self.show_status(False, "Tailscale CLI not found")
+            if not Path(SYSTEMCTL_EXECUTABLE).is_file():
+                self.show_status(False, "systemctl not found")
                 return
-            self.status_process.start(TAILSCALE_EXECUTABLE, ["status", "--json"])
+
+            # Always check the system service *before* asking the Tailscale CLI.
+            self.status_phase = "service"
+            self.status_timed_out = False
+            self.status_process.start(SYSTEMCTL_EXECUTABLE, ["is-active", TAILSCALED_UNIT])
             self.status_timeout.start(STATUS_TIMEOUT_MS)
 
         def on_status_finished(self, exit_code: int, exit_status: QProcess.ExitStatus) -> None:
             self.status_timeout.stop()
-            if self.active_action is not None:
-                return  # Ignore stale status results while changing connection state.
+            if self.active_action is not None or self.status_timed_out:
+                return  # Ignore stale status while changing the connection.
             if exit_status != QProcess.ExitStatus.NormalExit:
                 self.show_status(False, "Status command failed")
                 return
-            # Status JSON can be meaningful even if the command returns nonzero.
+
             output = bytes(self.status_process.readAllStandardOutput())
+            if self.status_phase == "service":
+                state = output.decode("utf-8", errors="replace").strip()
+                if state == "active":
+                    if not tailscale_binary_available():
+                        self.show_status(False, "Tailscale CLI not found")
+                        self.connect_after_start = False
+                        return
+                    self.status_phase = "tailscale"
+                    self.status_timed_out = False
+                    self.status_process.start(TAILSCALE_EXECUTABLE, ["status", "--json"])
+                    self.status_timeout.start(STATUS_TIMEOUT_MS)
+                    return
+
+                if self.connect_after_start:
+                    if state != "activating" or time.monotonic() >= self.connect_after_start_deadline:
+                        self.connect_after_start = False
+                        self.notify_error("Tailscale service did not become active.")
+                if state == "activating":
+                    self.show_status(False, "Tailscale service starting")
+                elif daemon_start_action(state) is not None:
+                    self.show_status(False, "Tailscale service stopped", action="start")
+                else:
+                    # Unknown, missing, and deactivating are *not* proof it is safe to start.
+                    self.show_status(False, "Tailscale service status unavailable")
+                return
+
+            # The CLI JSON can be meaningful even if tailscale exits nonzero.
             connected, label, ip = classify_status(output)
             self.device_snapshot = output
             local, peers = visible_devices(output)
@@ -293,13 +346,29 @@ def main() -> int:
                 self.device_info.setToolTip("")
             self.show_status(connected, label, ip, action_for_status(output))
 
+            if self.connect_after_start:
+                state = parse_status(output).get("BackendState")
+                if state == "Running":
+                    # tailscaled restored its previous connection automatically.
+                    self.connect_after_start = False
+                elif post_daemon_start_action(output) == "up":
+                    self.connect_after_start = False
+                    self.start_action("up")
+                elif state in ("NeedsLogin", "NeedsMachineAuth"):
+                    self.connect_after_start = False
+                    self.notify_error("Service started; Tailscale needs login or device approval.")
+                elif time.monotonic() >= self.connect_after_start_deadline:
+                    self.connect_after_start = False
+                    self.notify_error("Service started, but Tailscale did not report a ready state.")
+
         def on_status_error(self, error: QProcess.ProcessError) -> None:
             if error == QProcess.ProcessError.FailedToStart:
                 self.status_timeout.stop()
                 if self.active_action is None:
-                    self.show_status(False, "Cannot start Tailscale CLI")
+                    self.show_status(False, "Cannot start status command")
 
         def on_status_timeout(self) -> None:
+            self.status_timed_out = True
             self.show_status(False, "Status check timed out")
             if self.status_process.state() != QProcess.ProcessState.NotRunning:
                 self.status_process.kill()
@@ -311,17 +380,33 @@ def main() -> int:
         def toggle(self) -> None:
             if self.active_action is not None or self.next_action is None:
                 return
-            if not tailscale_binary_available():
+            self.start_action(self.next_action)
+
+        def start_action(self, command: str) -> None:
+            """Run an allowed action, without a shell or a sudo password pipe."""
+            if self.active_action is not None or command not in ("start", "up", "down"):
+                return
+            if command == "start":
+                if not Path(SYSTEMCTL_EXECUTABLE).is_file():
+                    self.notify_error("systemctl not found.")
+                    return
+            elif not tailscale_binary_available():
                 self.show_status(False, "Tailscale CLI not found")
                 return
 
-            command = self.next_action
             self.active_action = command
             self.action_timed_out = False
-            self.show_status(self.connected, "Connecting…" if command == "up" else "Disconnecting…")
-            # Use the normal user's Tailscale operator permission: never spawn sudo.
-            self.action_process.start(TAILSCALE_EXECUTABLE, [command])
-            self.action_timeout.start(ACTION_TIMEOUT_MS)
+            if command == "start":
+                self.show_status(False, "Starting Tailscale service…")
+                # systemctl requests authorization through systemd/PolicyKit. KDE
+                # can show its usual admin prompt, without invoking sudo or pkexec.
+                self.action_process.start(SYSTEMCTL_EXECUTABLE, ["start", TAILSCALED_UNIT])
+                self.action_timeout.start(SERVICE_START_TIMEOUT_MS)
+            else:
+                self.show_status(self.connected, "Connecting…" if command == "up" else "Disconnecting…")
+                # Use Tailscale operator permission; never launch this app as root.
+                self.action_process.start(TAILSCALE_EXECUTABLE, [command])
+                self.action_timeout.start(ACTION_TIMEOUT_MS)
 
         def on_action_finished(self, exit_code: int, exit_status: QProcess.ExitStatus) -> None:
             self.action_timeout.stop()
@@ -331,21 +416,38 @@ def main() -> int:
                 return
             error = bytes(self.action_process.readAllStandardError()).decode("utf-8", errors="replace").strip()
             out = bytes(self.action_process.readAllStandardOutput()).decode("utf-8", errors="replace").strip()
+            success = (not self.action_timed_out and
+                       exit_status == QProcess.ExitStatus.NormalExit and exit_code == 0)
+            if success and command == "start":
+                # Check the daemon and current Tailscale state again first. Do not
+                # call 'tailscale up' when tailscaled already reconnected itself.
+                self.connect_after_start = True
+                self.connect_after_start_deadline = time.monotonic() + POST_START_CHECK_TIMEOUT_SECONDS
+                self.refresh()
+                return
+
             if self.action_timed_out:
-                self.notify_error("Connection change timed out. Check Tailscale in a terminal.")
-            elif exit_status != QProcess.ExitStatus.NormalExit or exit_code != 0:
-                detail = error or out or f"tailscale {command} exited with code {exit_code}"
-                # A compact desktop notification; preserve full detail in stderr.
-                print(f"Tailscale toggle failed: {detail}", file=sys.stderr)
-                hint = '\nIf permission was denied: sudo tailscale set --operator="$USER"'
-                self.notify_error((detail[:250] + hint) if "permission" in detail.lower() or "access denied" in detail.lower() else detail[:300])
+                self.notify_error("Service start timed out." if command == "start" else
+                                  "Connection change timed out. Check Tailscale in a terminal.")
+            elif not success:
+                detail = error or out or f"{command} exited with code {exit_code}"
+                print(f"Tailscale {command} failed: {detail}", file=sys.stderr)
+                if command == "start":
+                    self.notify_error(("Unable to start tailscaled.service. " + detail)[:300])
+                else:
+                    hint = '\\nIf permission was denied: sudo tailscale set --operator="$USER"'
+                    self.notify_error((detail[:250] + hint)
+                                      if "permission" in detail.lower() or "access denied" in detail.lower()
+                                      else detail[:300])
             self.refresh()
 
         def on_action_error(self, error: QProcess.ProcessError) -> None:
             if error == QProcess.ProcessError.FailedToStart:
                 self.action_timeout.stop()
+                command = self.active_action
                 self.active_action = None
-                self.notify_error("Cannot run Tailscale CLI.")
+                self.notify_error("Cannot start systemctl." if command == "start" else
+                                  "Cannot run Tailscale CLI.")
                 self.refresh()
 
         def on_action_timeout(self) -> None:

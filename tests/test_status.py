@@ -34,6 +34,28 @@ class StatusTests(unittest.TestCase):
         self.assertIn('self.action_process.start(TAILSCALE_EXECUTABLE,', source)
         self.assertNotIn('shutil.which', source)
 
+    def test_daemon_start_action(self):
+        self.assertEqual(module.daemon_start_action('inactive'), 'start')
+        self.assertEqual(module.daemon_start_action('failed'), 'start')
+        for state in ('active', 'activating', 'deactivating', 'unknown', '', 'not-found'):
+            with self.subTest(state=state):
+                self.assertIsNone(module.daemon_start_action(state))
+
+    def test_only_connect_after_service_if_needed(self):
+        for state in ('Running', 'Starting', 'NeedsLogin', 'NeedsMachineAuth', 'NoState'):
+            with self.subTest(state=state):
+                self.assertIsNone(module.post_daemon_start_action(json.dumps({'BackendState': state})))
+        self.assertEqual(module.post_daemon_start_action('{"BackendState":"Stopped"}'), 'up')
+        self.assertIsNone(module.post_daemon_start_action('invalid json'))
+
+    def test_service_checked_before_tailscale_status(self):
+        source = SCRIPT.read_text()
+        self.assertIn('["is-active", TAILSCALED_UNIT]', source)
+        self.assertIn('["start", TAILSCALED_UNIT]', source)
+        self.assertIn('self.status_process.start(TAILSCALE_EXECUTABLE, ["status", "--json"])', source)
+        self.assertNotIn('sudo systemctl', source)
+        self.assertNotIn('pkexec', source.replace('or pkexec.', ''))
+
     def test_running(self):
         payload = {'BackendState': 'Running', 'Self': {'TailscaleIPs': ['100.90.2.3']}}
         self.assertEqual(module.classify_status(json.dumps(payload)), (True, 'Connected', '100.90.2.3'))
